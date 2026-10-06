@@ -8,12 +8,16 @@ import type { Leaf } from '@/types/leaf'
 import type { Paper } from '@/types/paper'
 import type { RepairOrder } from '@/types/repairOrder'
 import type { Binding } from '@/types/binding'
+import type { ConsignManifest } from '@/types/consignManifest'
+import type { ConsignIntake } from '@/types/consignIntake'
+import type { PaperRequisition } from '@/types/paperRequisition'
 import { BOOK_LEVEL_LABEL } from '@/types/book'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL } from '@/types/volume'
 import { DAMAGE_TYPE_LABEL, LEAF_STATE_LABEL } from '@/types/leaf'
 import { PAPER_TYPE_LABEL, deltaELevel } from '@/types/paper'
 import { REPAIR_NAME_LABEL } from '@/types/repairOrder'
 import { BINDING_VERDICT_LABEL } from '@/types/binding'
+import { effectiveAgreements, paperHoldings } from '@/utils/consign'
 import type { RestoreSnapshot } from './db'
 
 /** 触发浏览器下载 */
@@ -55,6 +59,10 @@ export interface ExportContext {
   papers: Paper[]
   repairOrders: RepairOrder[]
   bindings: Binding[]
+  /** v3 起随备份导出；旧调用方缺省时按空集合处理 */
+  consignManifests?: ConsignManifest[]
+  consignIntakes?: ConsignIntake[]
+  paperRequisitions?: PaperRequisition[]
 }
 
 /** 验收归档清单文本：按古籍 → 册次 → 书叶 → 工序展开 */
@@ -77,6 +85,28 @@ export function buildArchiveReport(context: ExportContext): string {
       lines.push(
         `   第 ${volume.volumeNo} 册　${BINDING_TYPE_LABEL[volume.bindingType]}　${VOLUME_STATE_LABEL[volume.state]}　叶数 ${volume.leafCount}　破损 ${totalArea} cm²　平均 pH ${averagePh}`
       )
+      if (volume.consignNo) {
+        const agreements = effectiveAgreements(context.consignManifests ?? [])
+        const agreed = agreements
+          .filter((line) => line.consignNo === volume.consignNo && line.volumeNo === volume.volumeNo)
+          .map((line) => `${PAPER_TYPE_LABEL[line.paperType]} ${line.agreedSheets}`)
+          .join(' / ')
+        const holdings = paperHoldings(
+          volume.consignNo,
+          volume.volumeNo,
+          (context.paperRequisitions ?? []).filter((req) => req.volumeId === volume.id),
+          agreements
+        )
+        const exceeded = holdings
+          .filter((item) => item.pendingSupplement)
+          .map((item) => `${item.paperLabel}超 ${item.exceededSheets} 张待补办`)
+          .join('；')
+        lines.push(
+          `      送修：编号 ${volume.consignNo}${volume.ownerUnit ? `　${volume.ownerUnit}` : ''}　约定 ${
+            agreed || '（无）'
+          }${exceeded ? `　⚠ ${exceeded}，不许并入验收` : ''}`
+        )
+      }
       lines.push(
         `      装订验收：${
           binding

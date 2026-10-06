@@ -14,6 +14,8 @@ import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useConsignStore } from '@/stores/consignStore'
+import { useConsignOverview } from '@/hooks/useConsignOverview'
 import {
   BINDING_METHOD_OPTIONS,
   BINDING_VERDICT_COLOR,
@@ -48,6 +50,8 @@ import {
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const consignStore = useConsignStore()
+const consignOverview = useConsignOverview()
 const { totals } = useLeafStats()
 const bindingTable = useIdbTable<Binding>((database) => database.bindings, { sortByUpdatedAt: false })
 const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpdatedAt: false })
@@ -59,7 +63,9 @@ const volumeOptions = computed(() =>
   bookStore.books.flatMap((book) =>
     bookStore.volumesOfBook(book.id).map((volume) => ({
       value: volume.id,
-      label: `《${book.title}》第 ${volume.volumeNo} 册 · ${BINDING_TYPE_LABEL[volume.bindingType]} · ${VOLUME_STATE_LABEL[volume.state]}`,
+      label: `《${book.title}》第 ${volume.volumeNo} 册 · ${BINDING_TYPE_LABEL[volume.bindingType]} · ${VOLUME_STATE_LABEL[volume.state]}${
+        volume.consignNo ? ` · 送修 ${volume.consignNo}` : ''
+      }`,
       locked: isVolumeLocked(volume.state)
     }))
   )
@@ -77,13 +83,18 @@ const stat = computed(() => {
   const pass = list.filter((item) => item.verdict === 'pass').length
   const archived = bookStore.volumes.filter((volume) => volume.state === 'archived').length
   const pendingBinding = bookStore.volumes.filter((volume) => !isVolumeLocked(volume.state)).length
+  // 送修册中被验收闸门拦住（待补办 / 未对上）的册数
+  const blockedConsign = bookStore.volumes.filter(
+    (volume) => volume.consignNo && consignOverview.blockOfVolume(volume.id).blocked
+  ).length
   return {
     total: list.length,
     pass,
     rework: list.length - pass,
     passPercent: list.length === 0 ? 0 : Math.round((pass / list.length) * 100),
     archived,
-    pendingBinding
+    pendingBinding,
+    blockedConsign
   }
 })
 
@@ -93,7 +104,10 @@ const context = computed(() => ({
   leaves: leafStore.leaves,
   papers: paperTable.rows.value,
   repairOrders: repairStore.orders,
-  bindings: bindingTable.rows.value
+  bindings: bindingTable.rows.value,
+  consignManifests: consignStore.manifests,
+  consignIntakes: consignStore.intakes,
+  paperRequisitions: consignStore.requisitions
 }))
 
 const archiveText = computed(() => buildArchiveReport(context.value))
@@ -102,6 +116,11 @@ const archiveText = computed(() => buildArchiveReport(context.value))
 const dialog = ref(false)
 const editing = ref<Binding | null>(null)
 const form = reactive<BindingDraft>(createEmptyBindingDraft(''))
+
+/** 送修册验收闸门：待补办未清 / 尚未对上时不许并入验收 */
+const currentBlock = computed(() =>
+  form.volumeId ? consignOverview.blockOfVolume(form.volumeId) : { blocked: false, reasons: [] }
+)
 
 function openCreate(): void {
   const first = volumeOptions.value[0]
@@ -129,6 +148,12 @@ function openEdit(binding: Binding): void {
 async function submit(): Promise<void> {
   if (!form.volumeId) {
     ElMessage.warning('请选择册次')
+    return
+  }
+  // 送修册验收闸门：合格验收前必须已对上且无超约定未补办的领用（返修登记不受拦）
+  if (form.verdict === 'pass' && currentBlock.value.blocked) {
+    ElMessage.error('该送修册暂不能验收合格：' )
+    currentBlock.value.reasons.forEach((reason) => ElMessage.warning(reason))
     return
   }
   if (editing.value) {
@@ -208,7 +233,13 @@ async function handleFile(event: Event): Promise<void> {
     return
   }
   await importSnapshot(parsed as RestoreSnapshot)
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([
+    bookStore.loadBooks(),
+    bookStore.loadVolumes(),
+    leafStore.loadLeaves(),
+    repairStore.loadOrders(),
+    consignStore.loadAll()
+  ])
   ElMessage.success('导入完成，数据已覆盖')
 }
 
@@ -223,7 +254,13 @@ async function handleReset(): Promise<void> {
     return
   }
   await resetDatabase()
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([
+    bookStore.loadBooks(),
+    bookStore.loadVolumes(),
+    leafStore.loadLeaves(),
+    repairStore.loadOrders(),
+    consignStore.loadAll()
+  ])
   ElMessage.success('已清空并重新载入演示数据')
 }
 
@@ -266,6 +303,7 @@ function verdictColor(verdict: string): string {
       <StatBadge label="返修" :value="stat.rework" suffix="条" tone="danger" />
       <StatBadge label="已归档册次" :value="stat.archived" suffix="册" tone="info" />
       <StatBadge label="待装订册次" :value="stat.pendingBinding" suffix="册" tone="warning" />
+      <StatBadge label="送修卡验收" :value="stat.blockedConsign" suffix="册" tone="danger" />
       <StatBadge label="工序完成率" :value="`${totals.orderPercent}%`" :percent="totals.orderPercent" />
     </div>
 
@@ -288,8 +326,20 @@ function verdictColor(verdict: string): string {
             @action="openCreate"
           />
           <el-table v-else :data="bindingTable.rows.value" size="small" border>
-            <el-table-column label="册次" min-width="180">
-              <template #default="{ row }">{{ volumeLabel(row.volumeId) }}</template>
+            <el-table-column label="册次" min-width="200">
+              <template #default="{ row }">
+                <div>{{ volumeLabel(row.volumeId) }}</div>
+                <el-tag
+                  v-if="bookStore.volumeById(row.volumeId)?.consignNo"
+                  size="small"
+                  type="warning"
+                  effect="plain"
+                  round
+                  style="margin-top: 2px"
+                >
+                  送修 {{ bookStore.volumeById(row.volumeId)?.consignNo }}
+                </el-tag>
+              </template>
             </el-table-column>
             <el-table-column prop="method" label="装订方式" width="130" />
             <el-table-column prop="finishDate" label="完工日期" width="120" sortable />
@@ -328,7 +378,7 @@ function verdictColor(verdict: string): string {
         <el-card shadow="never" style="margin-top: 16px">
           <template #header>整库导出</template>
           <p class="gb-muted">
-            导出文件包含 6 张业务表全量数据与结构版本号，可在其他设备通过「导入 JSON」还原。
+            导出文件包含 9 张业务表全量数据与结构版本号（含外单位送修单、对认记录与补纸领用），可在其他设备通过「导入 JSON」还原。
           </p>
           <div class="gb-toolbar">
             <el-button :icon="Download" @click="handleExport">JSON 备份</el-button>
@@ -371,7 +421,17 @@ function verdictColor(verdict: string): string {
         </el-form-item>
       </el-form>
       <el-alert
-        v-if="form.verdict === 'pass'"
+        v-if="currentBlock.blocked"
+        type="error"
+        show-icon
+        :closable="false"
+        title="该送修册不能验收合格"
+        style="margin-bottom: 10px"
+      >
+        <div v-for="(reason, index) in currentBlock.reasons" :key="index">· {{ reason }}</div>
+      </el-alert>
+      <el-alert
+        v-if="form.verdict === 'pass' && !currentBlock.blocked"
         type="success"
         show-icon
         :closable="false"
@@ -386,7 +446,13 @@ function verdictColor(verdict: string): string {
       />
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
-        <el-button type="primary" @click="submit">保存</el-button>
+        <el-button
+          type="primary"
+          :disabled="form.verdict === 'pass' && currentBlock.blocked"
+          @click="submit"
+        >
+          保存
+        </el-button>
       </template>
     </el-dialog>
   </div>

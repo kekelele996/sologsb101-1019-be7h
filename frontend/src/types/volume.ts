@@ -1,6 +1,7 @@
 /**
  * 册次（Volume）数据模型
  * 一部古籍下的册，是书叶与装订记录的挂载单元。
+ * 外单位送修的册次额外挂送修标记（consignNo）：仅标记归属，不影响破损与工序登记。
  */
 
 /** 装订形式：线装 / 蝴蝶装 / 包背装 */
@@ -21,6 +22,14 @@ export interface Volume {
   bindingType: BindingType;
   /** 当前状态 */
   state: VolumeState;
+  /**
+   * 送修编号（修复室侧挂的送修标记）。
+   * 与外单位送修单按「送修编号 + 册次号」对上后回填；null / 缺省表示本室自管（未送修）。
+   * 旧数据升级（v2→v3）统一回填 null，按未送修显示。
+   */
+  consignNo: string | null;
+  /** 送修单位（对上时从送修单带来；本室册次为 null） */
+  ownerUnit: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -80,5 +89,12 @@ export function createEmptyVolumeDraft(bookId: string, volumeNo: number): Volume
     leafCount: 0,
     bindingType: 'thread',
     state: 'pending',
+    consignNo: null,
+    ownerUnit: null,
   };
+}
+
+/** 是否为外单位送修册（挂有送修标记） */
+export function isConsignedVolume(volume: Pick<Volume, 'consignNo'>): boolean {
+  return typeof volume.consignNo === 'string' && volume.consignNo.trim().length > 0;
 }

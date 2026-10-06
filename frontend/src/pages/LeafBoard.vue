@@ -260,6 +260,9 @@ function stateColor(state: string): string {
           <el-tag v-if="currentVolume" type="info" effect="plain" round>
             已登记 {{ stat?.recordCount ?? 0 }} 条破损记录
           </el-tag>
+          <el-tag v-if="currentVolume?.consignNo" type="warning" effect="plain" round>
+            外单位送修 {{ currentVolume.consignNo }} · 破损与工序照旧登记
+          </el-tag>
         </div>
       </el-card>
 

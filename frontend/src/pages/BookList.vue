@@ -153,11 +153,21 @@ function openEditVolume(volume: Volume): void {
     volumeNo: volume.volumeNo,
     leafCount: volume.leafCount,
     bindingType: volume.bindingType,
-    state: volume.state
+    state: volume.state,
+    // 送修标记只随送修对账挂 / 摘，册次表单不编辑，但必须原样带回避免覆盖
+    consignNo: volume.consignNo,
+    ownerUnit: volume.ownerUnit
   })
 }
 
 async function submitVolume(): Promise<void> {
+  // 送修册的册次号是与外单位对账的双键之一，不允许在本侧改动（要改先到送修对账页撤销对上）
+  if (editingVolume.value?.consignNo && editingVolume.value.volumeNo !== volumeForm.volumeNo) {
+    ElMessage.warning(
+      `该册已挂送修编号 ${editingVolume.value.consignNo}，册次号不能改；如需调整请先在送修对账页撤销对上`
+    )
+    return
+  }
   if (editingVolume.value) {
     await bookStore.updateVolume(editingVolume.value.id, { ...volumeForm })
     ElMessage.success(`已更新第 ${volumeForm.volumeNo} 册`)
@@ -323,6 +333,16 @@ function bindingLabel(value: string): string {
                   <el-tag :style="{ background: `${BOOK_LEVEL_COLOR[book.level]}1f`, color: BOOK_LEVEL_COLOR[book.level], borderColor: `${BOOK_LEVEL_COLOR[book.level]}66` }" effect="plain" round>
                     {{ BOOK_LEVEL_LABEL[book.level] }}
                   </el-tag>
+                  <el-tag
+                    v-for="volume in bookStore.volumesOfBook(book.id).filter((item) => item.consignNo)"
+                    :key="volume.id"
+                    type="warning"
+                    effect="plain"
+                    size="small"
+                    round
+                  >
+                    第{{ volume.volumeNo }}册送修 {{ volume.consignNo }}
+                  </el-tag>
                 </div>
                 <el-button text type="primary" :icon="Right" @click.stop="openLeaves(book)">书叶</el-button>
               </div>
@@ -406,7 +426,7 @@ function bindingLabel(value: string): string {
           <template #default="{ row }">{{ bindingLabel(row.bindingType) }}</template>
         </el-table-column>
         <el-table-column prop="leafCount" label="叶数" width="80" />
-        <el-table-column label="状态" width="110">
+        <el-table-column label="状态" width="150">
           <template #default="{ row }">
             <el-tag
               :style="{ background: `${volumeStateColor(row.state)}1f`, color: volumeStateColor(row.state) }"
@@ -414,6 +434,9 @@ function bindingLabel(value: string): string {
               round
             >
               {{ volumeStateLabel(row.state) }}
+            </el-tag>
+            <el-tag v-if="row.consignNo" type="warning" effect="plain" size="small" round style="margin-left: 2px">
+              送修
             </el-tag>
           </template>
         </el-table-column>
