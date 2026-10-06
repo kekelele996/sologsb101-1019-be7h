@@ -1,7 +1,8 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
- * - 数据结构版本号与升级迁移逻辑（v1 → v2：Paper 增加 dyeRecipe 字段并按纸种回填默认配方）
- * - 六张业务表的增删改查与整库导入导出
+ * - 数据结构版本号与升级迁移逻辑（v1 → v2：Paper 增加 dyeRecipe 字段并按纸种回填默认配方；
+ *   v2 → v3：新增送修单 / 本侧对账关系 / 补纸领用三张表，老册次不回填，按未送修显示）
+ * - 九张业务表的增删改查与整库导入导出
  * - 首次打开自动播种三层互相引用的演示数据（幂等）
  * 纯前端应用：不依赖任何后端服务或数据库。
  */
@@ -12,12 +13,14 @@ import type { Leaf } from '@/types/leaf'
 import { DEFAULT_DYE_RECIPE, type Paper } from '@/types/paper'
 import type { RepairOrder } from '@/types/repairOrder'
 import type { Binding } from '@/types/binding'
+import type { ConsignmentLine, ConsignLink } from '@/types/consignment'
+import type { PaperRequisition } from '@/types/paperRequisition'
 
 /** 数据库名（README 与导出文件均使用该名称） */
 export const DB_NAME = 'gbbookrestore'
 
 /** 当前数据结构版本号 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -88,6 +91,12 @@ export class BookRestoreDatabase extends Dexie {
   papers!: Table<Paper, string>
   repairOrders!: Table<RepairOrder, string>
   bindings!: Table<Binding, string>
+  /** 藏书单位侧：送修单批次（append-only，本侧不改写） */
+  consignments!: Table<ConsignmentLine, string>
+  /** 修复室本侧：送修编号+册次号 与本侧册次的对账关系 */
+  consignLinks!: Table<ConsignLink, string>
+  /** 修复室本侧：补纸领用台账（超额部分挂起待补办） */
+  paperRequisitions!: Table<PaperRequisition, string>
 
   constructor() {
     super(DB_NAME)
@@ -122,6 +131,20 @@ export class BookRestoreDatabase extends Dexie {
             if (typeof paper.thicknessMm !== 'number') paper.thicknessMm = 0.06
           })
       })
+    // v3：外单位送修 —— 新增送修单 / 对账关系 / 补纸领用三张表。
+    // 不写 .upgrade() 修改器：旧 volumes / papers 等数据原样升级，
+    // 没有对账关系的旧册次一律按「未送修」显示（由查询层 join 决定，而非迁移回填）。
+    this.version(DB_VERSION).stores({
+      books: 'id, title, era, level, collectionNo, updatedAt',
+      volumes: 'id, bookId, volumeNo, bindingType, state, updatedAt',
+      leaves: 'id, volumeId, leafNo, damageType, phValue, state, updatedAt',
+      papers: 'id, leafId, paperType, laidPattern, deltaE, updatedAt',
+      repairOrders: 'id, leafId, seq, name, operator, state, updatedAt',
+      bindings: 'id, volumeId, method, verdict, finishDate, updatedAt',
+      consignments: 'id, sendNo, volumeNo, revisionSeq, receivedAt, ownerUnit',
+      consignLinks: 'id, sendNo, volumeNo, volumeId, linkedAt',
+      paperRequisitions: 'id, volumeId, leafId, paperType, state, date'
+    })
   }
 }
 
@@ -230,9 +253,166 @@ export async function seedDatabase(): Promise<void> {
     { id: 'bind_0101', volumeId: 'vol_0101', method: '四眼线装', finishDate: '2026-03-10', verdict: 'rework', inspector: '程砚', createdAt: now - day * 2, updatedAt: now - day * 2 }
   ]
 
+  // 外单位送修演示数据：
+  // - SX-2026-018 第 1 册：初约 + 一次改约（晚到那份为准），已对上 vol_0101；
+  //   竹纸领用 26 张超出新约定 24 张 → 2 张挂起待补办（仍超额，不能补办入账），验收被拦；
+  // - SX-2026-018 第 2 册：送修单已到但本侧没对册 → 待认领；
+  // - SX-2026-042 第 1 册：改约把宣纸从 4 张加到 8 张，已对上 vol_0201（已归档）；
+  //   此前 6 张宣纸里的 2 张挂起待补办，新约定已能吸收 → 可补办入账。
+  const consignments: ConsignmentLine[] = [
+    {
+      id: 'csl_018_1_r1',
+      sendNo: 'SX-2026-018',
+      volumeNo: 1,
+      ownerUnit: '甲县图书馆',
+      revision: 'initial',
+      revisionSeq: 1,
+      receivedAt: now - day * 12,
+      paperAllowances: [
+        { paperType: 'bamboo', agreedSheets: 20 },
+        { paperType: 'xuan', agreedSheets: 5 }
+      ],
+      note: '初约：竹纸 20 张、宣纸 5 张',
+      createdAt: now - day * 12,
+      updatedAt: now - day * 12
+    },
+    {
+      id: 'csl_018_1_r2',
+      sendNo: 'SX-2026-018',
+      volumeNo: 1,
+      ownerUnit: '甲县图书馆',
+      revision: 'amendment',
+      revisionSeq: 2,
+      receivedAt: now - day * 6,
+      paperAllowances: [
+        { paperType: 'bamboo', agreedSheets: 24 },
+        { paperType: 'xuan', agreedSheets: 5 }
+      ],
+      note: '改约：竹纸追加到 24 张',
+      createdAt: now - day * 6,
+      updatedAt: now - day * 6
+    },
+    {
+      id: 'csl_018_2_r1',
+      sendNo: 'SX-2026-018',
+      volumeNo: 2,
+      ownerUnit: '甲县图书馆',
+      revision: 'initial',
+      revisionSeq: 1,
+      receivedAt: now - day * 12,
+      paperAllowances: [{ paperType: 'bark', agreedSheets: 10 }],
+      note: '初约：皮纸 10 张（修复室尚未认出对应册次）',
+      createdAt: now - day * 12,
+      updatedAt: now - day * 12
+    },
+    {
+      id: 'csl_042_1_r1',
+      sendNo: 'SX-2026-042',
+      volumeNo: 1,
+      ownerUnit: '乙市古籍馆',
+      revision: 'initial',
+      revisionSeq: 1,
+      receivedAt: now - day * 28,
+      paperAllowances: [
+        { paperType: 'bamboo', agreedSheets: 16 },
+        { paperType: 'xuan', agreedSheets: 4 }
+      ],
+      note: '初约：竹纸 16 张、宣纸 4 张',
+      createdAt: now - day * 28,
+      updatedAt: now - day * 28
+    },
+    {
+      id: 'csl_042_1_r2',
+      sendNo: 'SX-2026-042',
+      volumeNo: 1,
+      ownerUnit: '乙市古籍馆',
+      revision: 'amendment',
+      revisionSeq: 2,
+      receivedAt: now - day * 4,
+      paperAllowances: [
+        { paperType: 'bamboo', agreedSheets: 16 },
+        { paperType: 'xuan', agreedSheets: 8 }
+      ],
+      note: '改约：宣纸追加到 8 张',
+      createdAt: now - day * 4,
+      updatedAt: now - day * 4
+    }
+  ]
+
+  const consignLinks: ConsignLink[] = [
+    { id: 'csk_018_1', sendNo: 'SX-2026-018', volumeNo: 1, volumeId: 'vol_0101', linkedAt: now - day * 11, createdAt: now - day * 11, updatedAt: now - day * 11 },
+    { id: 'csk_042_1', sendNo: 'SX-2026-042', volumeNo: 1, volumeId: 'vol_0201', linkedAt: now - day * 27, createdAt: now - day * 27, updatedAt: now - day * 27 }
+  ]
+
+  const paperRequisitions: PaperRequisition[] = [
+    // vol_0101（有效约定 竹纸24 / 宣纸5）：两笔竹纸领用累计 26
+    {
+      id: 'req_010101',
+      volumeId: 'vol_0101',
+      leafId: 'leaf_010101',
+      paperType: 'bamboo',
+      usedSheets: 20,
+      inQuotaSheets: 20,
+      pendingSheets: 0,
+      basisLineId: 'csl_018_1_r2',
+      basisAgreedSheets: 24,
+      state: 'in_quota',
+      operator: '沈玉',
+      date: '2026-09-25',
+      note: '首批领用',
+      createdAt: now - day * 5,
+      updatedAt: now - day * 5
+    },
+    {
+      id: 'req_010102',
+      volumeId: 'vol_0101',
+      leafId: 'leaf_010102',
+      paperType: 'bamboo',
+      usedSheets: 6,
+      inQuotaSheets: 4,
+      pendingSheets: 2,
+      basisLineId: 'csl_018_1_r2',
+      basisAgreedSheets: 24,
+      state: 'pending_supplement',
+      operator: '沈玉',
+      date: '2026-09-28',
+      note: '超出约定 2 张，挂起待藏书单位补办',
+      createdAt: now - day * 3,
+      updatedAt: now - day * 3
+    },
+    // vol_0201（有效约定 竹纸16 / 宣纸8）：宣纸累计 6，改约前超额 2，现已可补办入账
+    {
+      id: 'req_020101',
+      volumeId: 'vol_0201',
+      leafId: 'leaf_020101',
+      paperType: 'xuan',
+      usedSheets: 6,
+      inQuotaSheets: 4,
+      pendingSheets: 2,
+      basisLineId: 'csl_042_1_r1',
+      basisAgreedSheets: 4,
+      state: 'pending_supplement',
+      operator: '陆敏',
+      date: '2026-02-27',
+      note: '初约只给 4 张，超出 2 张挂起；改约后约定 8 张，可补办入账',
+      createdAt: now - day * 21,
+      updatedAt: now - day * 21
+    }
+  ]
+
   await db.transaction(
     'rw',
-    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings],
+    [
+      db.books,
+      db.volumes,
+      db.leaves,
+      db.papers,
+      db.repairOrders,
+      db.bindings,
+      db.consignments,
+      db.consignLinks,
+      db.paperRequisitions
+    ],
     async () => {
       await db.books.bulkPut(books)
       await db.volumes.bulkPut(volumes)
@@ -240,6 +420,9 @@ export async function seedDatabase(): Promise<void> {
       await db.papers.bulkPut(papers)
       await db.repairOrders.bulkPut(repairOrders)
       await db.bindings.bulkPut(bindings)
+      await db.consignments.bulkPut(consignments)
+      await db.consignLinks.bulkPut(consignLinks)
+      await db.paperRequisitions.bulkPut(paperRequisitions)
     }
   )
 }
@@ -256,17 +439,24 @@ export interface RestoreSnapshot {
   papers: Paper[]
   repairOrders: RepairOrder[]
   bindings: Binding[]
+  consignments: ConsignmentLine[]
+  consignLinks: ConsignLink[]
+  paperRequisitions: PaperRequisition[]
 }
 
 export async function exportSnapshot(): Promise<RestoreSnapshot> {
-  const [books, volumes, leaves, papers, repairOrders, bindings] = await Promise.all([
-    db.books.toArray(),
-    db.volumes.toArray(),
-    db.leaves.toArray(),
-    db.papers.toArray(),
-    db.repairOrders.toArray(),
-    db.bindings.toArray()
-  ])
+  const [books, volumes, leaves, papers, repairOrders, bindings, consignments, consignLinks, paperRequisitions] =
+    await Promise.all([
+      db.books.toArray(),
+      db.volumes.toArray(),
+      db.leaves.toArray(),
+      db.papers.toArray(),
+      db.repairOrders.toArray(),
+      db.bindings.toArray(),
+      db.consignments.toArray(),
+      db.consignLinks.toArray(),
+      db.paperRequisitions.toArray()
+    ])
   return {
     app: DB_NAME,
     schemaVersion: DB_VERSION,
@@ -276,11 +466,17 @@ export async function exportSnapshot(): Promise<RestoreSnapshot> {
     leaves,
     papers,
     repairOrders,
-    bindings
+    bindings,
+    consignments,
+    consignLinks,
+    paperRequisitions
   }
 }
 
-/** 校验导入文件结构，返回错误文案（空串表示通过） */
+/**
+ * 校验导入文件结构，返回错误文案（空串表示通过）。
+ * v3 的三张送修表缺失时给出兼容默认（旧备份按「无送修」导入，旧数据按未送修显示）。
+ */
 export function validateSnapshot(input: unknown): string {
   if (typeof input !== 'object' || input === null) return '文件内容不是合法的 JSON 对象'
   const snapshot = input as Partial<RestoreSnapshot>
@@ -302,7 +498,17 @@ export function validateSnapshot(input: unknown): string {
 export async function importSnapshot(snapshot: RestoreSnapshot): Promise<void> {
   await db.transaction(
     'rw',
-    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings],
+    [
+      db.books,
+      db.volumes,
+      db.leaves,
+      db.papers,
+      db.repairOrders,
+      db.bindings,
+      db.consignments,
+      db.consignLinks,
+      db.paperRequisitions
+    ],
     async () => {
       await Promise.all([
         db.books.clear(),
@@ -310,7 +516,10 @@ export async function importSnapshot(snapshot: RestoreSnapshot): Promise<void> {
         db.leaves.clear(),
         db.papers.clear(),
         db.repairOrders.clear(),
-        db.bindings.clear()
+        db.bindings.clear(),
+        db.consignments.clear(),
+        db.consignLinks.clear(),
+        db.paperRequisitions.clear()
       ])
       await db.books.bulkPut(snapshot.books)
       await db.volumes.bulkPut(snapshot.volumes)
@@ -318,6 +527,10 @@ export async function importSnapshot(snapshot: RestoreSnapshot): Promise<void> {
       await db.papers.bulkPut(snapshot.papers)
       await db.repairOrders.bulkPut(snapshot.repairOrders)
       await db.bindings.bulkPut(snapshot.bindings)
+      // 旧版本备份没有送修三表：按空集合导入，旧册次自然按未送修显示
+      await db.consignments.bulkPut(snapshot.consignments ?? [])
+      await db.consignLinks.bulkPut(snapshot.consignLinks ?? [])
+      await db.paperRequisitions.bulkPut(snapshot.paperRequisitions ?? [])
     }
   )
 }
@@ -325,7 +538,17 @@ export async function importSnapshot(snapshot: RestoreSnapshot): Promise<void> {
 export async function clearAllTables(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings],
+    [
+      db.books,
+      db.volumes,
+      db.leaves,
+      db.papers,
+      db.repairOrders,
+      db.bindings,
+      db.consignments,
+      db.consignLinks,
+      db.paperRequisitions
+    ],
     async () => {
       await Promise.all([
         db.books.clear(),
@@ -333,7 +556,10 @@ export async function clearAllTables(): Promise<void> {
         db.leaves.clear(),
         db.papers.clear(),
         db.repairOrders.clear(),
-        db.bindings.clear()
+        db.bindings.clear(),
+        db.consignments.clear(),
+        db.consignLinks.clear(),
+        db.paperRequisitions.clear()
       ])
     }
   )
@@ -345,18 +571,22 @@ export async function resetDatabase(): Promise<void> {
 }
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [books, volumes, leaves, papers, repairOrders, bindings] = await Promise.all([
-    db.books.count(),
-    db.volumes.count(),
-    db.leaves.count(),
-    db.papers.count(),
-    db.repairOrders.count(),
-    db.bindings.count()
-  ])
-  return { books, volumes, leaves, papers, repairOrders, bindings }
+  const [books, volumes, leaves, papers, repairOrders, bindings, consignments, consignLinks, paperRequisitions] =
+    await Promise.all([
+      db.books.count(),
+      db.volumes.count(),
+      db.leaves.count(),
+      db.papers.count(),
+      db.repairOrders.count(),
+      db.bindings.count(),
+      db.consignments.count(),
+      db.consignLinks.count(),
+      db.paperRequisitions.count()
+    ])
+  return { books, volumes, leaves, papers, repairOrders, bindings, consignments, consignLinks, paperRequisitions }
 }
 
-/** 级联删除古籍 → 册次 → 书叶 → 补纸 / 工序 / 装订 */
+/** 级联删除古籍 → 册次 → 书叶 → 补纸 / 工序 / 装订（本侧对账关系、领用一并清；送修单保留） */
 export async function removeBookCascade(bookId: string): Promise<void> {
   const volumeIds = (await db.volumes.where('bookId').equals(bookId).toArray()).map((row) => row.id)
   const leafIds = volumeIds.length
@@ -364,7 +594,16 @@ export async function removeBookCascade(bookId: string): Promise<void> {
     : []
   await db.transaction(
     'rw',
-    [db.books, db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings],
+    [
+      db.books,
+      db.volumes,
+      db.leaves,
+      db.papers,
+      db.repairOrders,
+      db.bindings,
+      db.consignLinks,
+      db.paperRequisitions
+    ],
     async () => {
       if (leafIds.length > 0) {
         await db.papers.where('leafId').anyOf(leafIds).delete()
@@ -373,6 +612,8 @@ export async function removeBookCascade(bookId: string): Promise<void> {
       if (volumeIds.length > 0) {
         await db.leaves.where('volumeId').anyOf(volumeIds).delete()
         await db.bindings.where('volumeId').anyOf(volumeIds).delete()
+        await db.paperRequisitions.where('volumeId').anyOf(volumeIds).delete()
+        await db.consignLinks.where('volumeId').anyOf(volumeIds).delete()
       }
       await db.volumes.where('bookId').equals(bookId).delete()
       await db.books.delete(bookId)
@@ -380,12 +621,20 @@ export async function removeBookCascade(bookId: string): Promise<void> {
   )
 }
 
-/** 级联删除册次 → 书叶 → 补纸 / 工序 / 装订 */
+/** 级联删除册次 → 书叶 → 补纸 / 工序 / 装订（本侧对账关系、领用一并清；送修单保留回到待认领） */
 export async function removeVolumeCascade(volumeId: string): Promise<void> {
   const leafIds = (await db.leaves.where('volumeId').equals(volumeId).toArray()).map((row) => row.id)
   await db.transaction(
     'rw',
-    [db.volumes, db.leaves, db.papers, db.repairOrders, db.bindings],
+    [
+      db.volumes,
+      db.leaves,
+      db.papers,
+      db.repairOrders,
+      db.bindings,
+      db.consignLinks,
+      db.paperRequisitions
+    ],
     async () => {
       if (leafIds.length > 0) {
         await db.papers.where('leafId').anyOf(leafIds).delete()
@@ -393,6 +642,8 @@ export async function removeVolumeCascade(volumeId: string): Promise<void> {
       }
       await db.leaves.where('volumeId').equals(volumeId).delete()
       await db.bindings.where('volumeId').equals(volumeId).delete()
+      await db.paperRequisitions.where('volumeId').equals(volumeId).delete()
+      await db.consignLinks.where('volumeId').equals(volumeId).delete()
       await db.volumes.delete(volumeId)
     }
   )

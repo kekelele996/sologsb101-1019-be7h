@@ -8,7 +8,8 @@
     "dev": "vite --host --port 22819",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host --port 22819",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "verify:consign": "esbuild scripts/verify-consign-rules.mts --bundle --platform=node --format=esm --outfile=scripts/.verify-rules.mjs --log-level=warning && node scripts/.verify-rules.mjs && esbuild scripts/verify-consign-db.mts --bundle --platform=node --format=esm --alias:@=./src --outfile=scripts/.verify-db.mjs --log-level=warning && node scripts/.verify-db.mjs && rm -f scripts/.verify-rules.mjs scripts/.verify-db.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
@@ -21,6 +22,7 @@
   "devDependencies": {
     "@types/node": "^22.20.4",
     "@vitejs/plugin-vue": "^5.2.1",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "~5.7.3",
     "vite": "^6.1.0",
     "vue-tsc": "^2.2.0"

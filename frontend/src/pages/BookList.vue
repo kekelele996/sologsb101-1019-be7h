@@ -11,11 +11,13 @@ import { Delete, Edit, Plus, Right } from '@element-plus/icons-vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import FilterBar, { useFilterQuery, type FilterModel } from '@/components/common/FilterBar.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
+import ConsignTag from '@/components/common/ConsignTag.vue'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useConsignStore } from '@/stores/consignStore'
 import {
   BOOK_LEVEL_COLOR,
   BOOK_LEVEL_LABEL,
@@ -42,6 +44,7 @@ const router = useRouter()
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const consignStore = useConsignStore()
 const { statOf } = useLeafStats()
 const bindingTable = useIdbTable<Binding>((database) => database.bindings, { sortByUpdatedAt: false })
 
@@ -255,6 +258,11 @@ function volumeStateColor(state: string): string {
 function bindingLabel(value: string): string {
   return BINDING_TYPE_LABEL[value as keyof typeof BINDING_TYPE_LABEL] ?? value
 }
+
+/** 本侧册次的送修标记（没有对账关系即未送修，旧册次升级后同样不显示） */
+function consignLinkOf(volumeId: string) {
+  return consignStore.linkOfVolume(volumeId)
+}
 </script>
 
 <template>
@@ -336,6 +344,11 @@ function bindingLabel(value: string): string {
                 <strong>{{ bookStat(book.id).orderDone }}</strong> / {{ bookStat(book.id).orderTotal }}
               </span>
               <span class="gb-muted">破损总面积 {{ bookStat(book.id).area }} cm² · 装订验收 {{ boundVolumes(book.id) }} 册</span>
+              <span v-if="bookStore.volumesOfBook(book.id).some((volume) => consignLinkOf(volume.id))">
+                <el-tag type="warning" effect="plain" size="small" round>
+                  含送修册 {{ bookStore.volumesOfBook(book.id).filter((volume) => consignLinkOf(volume.id)).length }} 册
+                </el-tag>
+              </span>
 
               <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px" @click.stop>
                 <el-button size="small" @click="openVolumeDialog(book)">册次管理</el-button>
@@ -401,7 +414,17 @@ function bindingLabel(value: string): string {
       </el-form>
 
       <el-table :data="volumeList" size="small" border>
-        <el-table-column prop="volumeNo" label="册次" width="80" />
+        <el-table-column prop="volumeNo" label="册次" width="80">
+          <template #default="{ row }">
+            第 {{ row.volumeNo }} 册
+            <ConsignTag
+              v-if="consignLinkOf(row.id)"
+              :send-no="consignLinkOf(row.id)?.sendNo ?? ''"
+              :volume-no="row.volumeNo"
+              size="small"
+            />
+          </template>
+        </el-table-column>
         <el-table-column label="装订形式" width="110">
           <template #default="{ row }">{{ bindingLabel(row.bindingType) }}</template>
         </el-table-column>

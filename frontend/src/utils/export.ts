@@ -8,12 +8,15 @@ import type { Leaf } from '@/types/leaf'
 import type { Paper } from '@/types/paper'
 import type { RepairOrder } from '@/types/repairOrder'
 import type { Binding } from '@/types/binding'
+import type { ConsignmentLine, ConsignLink } from '@/types/consignment'
+import type { PaperRequisition } from '@/types/paperRequisition'
 import { BOOK_LEVEL_LABEL } from '@/types/book'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL } from '@/types/volume'
 import { DAMAGE_TYPE_LABEL, LEAF_STATE_LABEL } from '@/types/leaf'
 import { PAPER_TYPE_LABEL, deltaELevel } from '@/types/paper'
 import { REPAIR_NAME_LABEL } from '@/types/repairOrder'
 import { BINDING_VERDICT_LABEL } from '@/types/binding'
+import { effectiveLineOf } from './consignment'
 import type { RestoreSnapshot } from './db'
 
 /** 触发浏览器下载 */
@@ -55,6 +58,35 @@ export interface ExportContext {
   papers: Paper[]
   repairOrders: RepairOrder[]
   bindings: Binding[]
+  /** v3 起可选：送修单 / 对账关系 / 补纸领用，缺省时按「无送修」渲染 */
+  consignments?: ConsignmentLine[]
+  consignLinks?: ConsignLink[]
+  paperRequisitions?: PaperRequisition[]
+}
+
+/** 册次的送修信息（无对账关系即未送修，旧数据升级后同样得到 null） */
+function consignInfoOf(
+  context: ExportContext,
+  volumeId: string
+): { sendNo: string; volumeNo: number; ownerUnit: string; agreedText: string } | null {
+  if (!context.consignLinks || !context.consignments) return null
+  const link = context.consignLinks.find((item) => item.volumeId === volumeId)
+  if (!link) return null
+  const line = effectiveLineOf(context.consignments, link.sendNo, link.volumeNo)
+  if (!line) return null
+  const agreedText =
+    line.paperAllowances.length === 0
+      ? '未约定补纸'
+      : line.paperAllowances.map((item) => `${PAPER_TYPE_LABEL[item.paperType]}×${item.agreedSheets}`).join(' / ')
+  return { sendNo: link.sendNo, volumeNo: link.volumeNo, ownerUnit: line.ownerUnit, agreedText }
+}
+
+/** 该册挂起待补办张数（>0 时不允许并进验收） */
+function pendingSheetsOf(context: ExportContext, volumeId: string): number {
+  if (!context.paperRequisitions) return 0
+  return context.paperRequisitions
+    .filter((row) => row.volumeId === volumeId && row.state === 'pending_supplement')
+    .reduce((sum, row) => sum + row.pendingSheets, 0)
 }
 
 /** 验收归档清单文本：按古籍 → 册次 → 书叶 → 工序展开 */
@@ -71,12 +103,21 @@ export function buildArchiveReport(context: ExportContext): string {
     volumes.forEach((volume) => {
       const leaves = context.leaves.filter((leaf) => leaf.volumeId === volume.id)
       const binding = context.bindings.find((item) => item.volumeId === volume.id)
+      const consign = consignInfoOf(context, volume.id)
+      const pendingSheets = pendingSheetsOf(context, volume.id)
       const totalArea = Math.round(leaves.reduce((sum, leaf) => sum + leaf.damageAreaCm2, 0) * 10) / 10
       const averagePh =
         leaves.length === 0 ? 0 : Math.round((leaves.reduce((sum, leaf) => sum + leaf.phValue, 0) / leaves.length) * 100) / 100
       lines.push(
         `   第 ${volume.volumeNo} 册　${BINDING_TYPE_LABEL[volume.bindingType]}　${VOLUME_STATE_LABEL[volume.state]}　叶数 ${volume.leafCount}　破损 ${totalArea} cm²　平均 pH ${averagePh}`
       )
+      if (consign) {
+        lines.push(
+          `      〔送修〕${consign.ownerUnit || '外单位'}　送修编号 ${consign.sendNo}（第 ${consign.volumeNo} 册）　约定补纸 ${consign.agreedText}${
+            pendingSheets > 0 ? `　★ 超额挂起待补办 ${pendingSheets} 张，未并入验收` : ''
+          }`
+        )
+      }
       lines.push(
         `      装订验收：${
           binding
@@ -109,6 +150,9 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
   const header = [
     '书名',
     '册次',
+    '送修编号',
+    '送修单位',
+    '待补办张数',
     '叶号',
     '破损类型',
     '面积(cm²)',
@@ -131,6 +175,8 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
       const leaves = context.leaves
         .filter((leaf) => leaf.volumeId === volume.id)
         .sort((a, b) => a.leafNo - b.leafNo)
+      const consign = consignInfoOf(context, volume.id)
+      const pendingSheets = pendingSheetsOf(context, volume.id)
       leaves.forEach((leaf) => {
         const paper = context.papers.find((item) => item.leafId === leaf.id)
         const orders = context.repairOrders
@@ -142,6 +188,9 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
           [
             book.title,
             `第 ${volume.volumeNo} 册`,
+            consign?.sendNo ?? '',
+            consign?.ownerUnit ?? '',
+            pendingSheets,
             leaf.leafNo,
             DAMAGE_TYPE_LABEL[leaf.damageType],
             leaf.damageAreaCm2,

@@ -34,6 +34,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '修复工序记录', icon: 'Tools' }
   },
   {
+    path: '/consigns',
+    name: 'consign-board',
+    component: () => import('@/pages/ConsignBoard.vue'),
+    meta: { title: '送修对账与补纸领用', icon: 'Connection' }
+  },
+  {
     path: '/export',
     name: 'export-view',
     component: () => import('@/pages/ExportView.vue'),

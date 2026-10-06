@@ -14,6 +14,8 @@ import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useConsignStore } from '@/stores/consignStore'
+import ConsignTag from '@/components/common/ConsignTag.vue'
 import {
   BINDING_METHOD_OPTIONS,
   BINDING_VERDICT_COLOR,
@@ -48,6 +50,7 @@ import {
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const consignStore = useConsignStore()
 const { totals } = useLeafStats()
 const bindingTable = useIdbTable<Binding>((database) => database.bindings, { sortByUpdatedAt: false })
 const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpdatedAt: false })
@@ -93,7 +96,10 @@ const context = computed(() => ({
   leaves: leafStore.leaves,
   papers: paperTable.rows.value,
   repairOrders: repairStore.orders,
-  bindings: bindingTable.rows.value
+  bindings: bindingTable.rows.value,
+  consignments: consignStore.consignments,
+  consignLinks: consignStore.links,
+  paperRequisitions: consignStore.requisitions
 }))
 
 const archiveText = computed(() => buildArchiveReport(context.value))
@@ -126,9 +132,19 @@ function openEdit(binding: Binding): void {
   dialog.value = true
 }
 
+const formBlocked = computed(() => (form.volumeId ? consignStore.volumeBlockedForAcceptance(form.volumeId) : false))
+
 async function submit(): Promise<void> {
   if (!form.volumeId) {
     ElMessage.warning('请选择册次')
+    return
+  }
+  // 送修册存在「挂起待补办」的超额补纸领用：不许并进验收（合格 / 返修都拦截到补办完成）
+  if (consignStore.volumeBlockedForAcceptance(form.volumeId)) {
+    const link = consignStore.linkOfVolume(form.volumeId)
+    ElMessage.error(
+      `该册${link ? `（送修 ${link.sendNo} 第 ${link.volumeNo} 册）` : ''}有补纸领用超出约定挂起待补办，先到「送修对账」补办入账后再验收`
+    )
     return
   }
   if (editing.value) {
@@ -208,7 +224,13 @@ async function handleFile(event: Event): Promise<void> {
     return
   }
   await importSnapshot(parsed as RestoreSnapshot)
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([
+    bookStore.loadBooks(),
+    bookStore.loadVolumes(),
+    leafStore.loadLeaves(),
+    repairStore.loadOrders(),
+    consignStore.loadAll()
+  ])
   ElMessage.success('导入完成，数据已覆盖')
 }
 
@@ -223,7 +245,13 @@ async function handleReset(): Promise<void> {
     return
   }
   await resetDatabase()
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([
+    bookStore.loadBooks(),
+    bookStore.loadVolumes(),
+    leafStore.loadLeaves(),
+    repairStore.loadOrders(),
+    consignStore.loadAll()
+  ])
   ElMessage.success('已清空并重新载入演示数据')
 }
 
@@ -288,8 +316,18 @@ function verdictColor(verdict: string): string {
             @action="openCreate"
           />
           <el-table v-else :data="bindingTable.rows.value" size="small" border>
-            <el-table-column label="册次" min-width="180">
-              <template #default="{ row }">{{ volumeLabel(row.volumeId) }}</template>
+            <el-table-column label="册次" min-width="200">
+              <template #default="{ row }">
+                <div>{{ volumeLabel(row.volumeId) }}</div>
+                <ConsignTag
+                  v-if="consignStore.linkOfVolume(row.volumeId)"
+                  :send-no="consignStore.linkOfVolume(row.volumeId)?.sendNo ?? ''"
+                  size="small"
+                />
+                <el-tag v-if="consignStore.volumeBlockedForAcceptance(row.volumeId)" type="danger" effect="plain" size="small" round style="margin-left: 4px">
+                  待补办·禁验收
+                </el-tag>
+              </template>
             </el-table-column>
             <el-table-column prop="method" label="装订方式" width="130" />
             <el-table-column prop="finishDate" label="完工日期" width="120" sortable />
@@ -371,7 +409,16 @@ function verdictColor(verdict: string): string {
         </el-form-item>
       </el-form>
       <el-alert
-        v-if="form.verdict === 'pass'"
+        v-if="formBlocked"
+        type="error"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 10px"
+        title="该册有补纸领用超出约定，挂起待补办"
+        description="超额部分不许并进验收。请先到「送修对账」页等待藏书单位改约并补办入账，再登记验收。"
+      />
+      <el-alert
+        v-if="form.verdict === 'pass' && !formBlocked"
         type="success"
         show-icon
         :closable="false"
